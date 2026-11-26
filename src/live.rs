@@ -2,14 +2,12 @@
 //! （设计 73 第四节第 4 条：进程按 Miyu 会话复用）。
 //!
 //! - 带工具的（[`Wiring`]）：路由和「乱说话了」的标记用总台那一份，MCP 服务转来的调用和 agent 的输出进同一条信号通道。
-//! - 一轮以交回结束时，挂着的那件（MCP 调用的 [`Reply`]，或者 agent 等着回话的权限请求）跟着 [`Live`]（[`Live::set_pending`]），
+//! - 一轮以交回结束时，挂着的那件（MCP 调用的 [`Reply`]）跟着 [`Live`]（[`Live::set_pending`]），
 //!   等下一次请求带结果来；这一轮的 `session/prompt` 还没回，编号记在 [`Live::prompt`]。
-//! - 收掉（丢掉这个值时）：挂着的权限请求回 `cancelled`、从总台拿掉口令、收进程组。
+//! - 收掉（丢掉这个值时）：从总台拿掉口令、收进程组。
 
 use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
-
-use serde_json::Value;
 
 use crate::acp::Conn;
 use crate::acp::handshake::Caps;
@@ -27,15 +25,6 @@ pub enum Pending {
         n: u64,
         /// 等着回话的连接。
         reply: Reply,
-    },
-    /// 交回核心问主人的一次权限请求：问话编号、agent 那个请求的编号、它给的选项。
-    Permission {
-        /// 问话编号（这个会话里从 1 起）。
-        n: u64,
-        /// agent 的请求编号，回话时原样带上。
-        id: Value,
-        /// agent 给的选项。
-        options: Vec<Value>,
     },
 }
 
@@ -162,12 +151,6 @@ impl Live {
 
 impl Drop for Live {
     fn drop(&mut self) {
-        if let Some(Pending::Permission { id, .. }) = self.pending.take() {
-            self.conn.reply(
-                &id,
-                &serde_json::json!({"outcome": {"outcome": "cancelled"}}),
-            );
-        }
         drop(self.wiring.take());
     }
 }

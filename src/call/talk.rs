@@ -1,8 +1,8 @@
-//! 一轮的读写：先做「开头」（发 `session/prompt`；或者把工具结果、主人的回答回给 agent），然后读 agent 的 `session/update`，
-//! 照 [`Turn`] 交增量，读到 `session/prompt` 的回应、或者交回一件工具调用（一次问主人）为止。
+//! 一轮的读写：先做「开头」（发 `session/prompt`；或者把工具结果回给 agent），然后读 agent 的 `session/update`，
+//! 照 [`Turn`] 交增量，读到 `session/prompt` 的回应、或者交回一件工具调用为止。
 //!
-//! - agent 要权限（`session/request_permission`）：照 [`permission::judge`] 当场答；要问主人的交回一块 `ask_user`，这一次结束，
-//!   agent 那头等着。别的 agent 请求（`fs/*`、`terminal/*`，本包都没声明）回「没有这个方法」。
+//! - agent 要权限（`session/request_permission`）：照 [`permission::judge`] 当场答；要问主人的请核心问（`approve.rs`，核心的
+//!   `driver.approve`），接着听，核心回了再回 agent。别的 agent 请求（`fs/*`、`terminal/*`，本包都没声明）回「没有这个方法」。
 //! - Miyu 的工具调用有两边：流里的 `tool_call` 和 MCP 服务转来的 `tools/call`，谁先到都可能。第一边到了就开始掐表（[`pair_wait`]），
 //!   到点还没等到另一边就照 [`Turn::timeout`]（照 `miyu-antigravity`）。
 //! - `driver.cancel`：发 `session/cancel`，回 `retryable`；这段会话随后作废。
@@ -12,6 +12,7 @@ use std::time::{Duration, Instant};
 
 use serde_json::{Value, json};
 
+use super::approve::Asking;
 use super::{Job, Signal, cancelled};
 use crate::acp::METHOD_NOT_FOUND;
 use crate::bridge::Reply;
@@ -44,7 +45,7 @@ pub enum Ended {
     Answer(Value),
     /// agent 一行都没写就没了：照没交增量归类的出错。接在复用的进程上的，可以改成新开。
     Silent(Value),
-    /// 交回了一件工具调用（一次问主人）：回答和挂着的那件。
+    /// 交回了一件工具调用：回答和挂着的那件。
     Handed(Value, Pending),
 }
 
@@ -89,8 +90,16 @@ pub fn talk(
 /// 手里挂着的：MCP 那边到了、还没交回的那件。
 type Held = Option<(u64, Reply)>;
 
-/// 读到这一轮有回答、或者交回了为止。
+/// 读到这一轮有回答、或者交回了为止；还在请核心问着的权限请求回 `cancelled`。
 fn listen(job: &Job<'_>, live: &mut Live, turn: &mut Turn) -> Ended {
+    let mut asking = Asking::default();
+    let ended = hear(job, live, turn, &mut asking);
+    asking.abandon(live);
+    ended
+}
+
+/// [`listen`] 的读。
+fn hear(job: &Job<'_>, live: &mut Live, turn: &mut Turn, asking: &mut Asking) -> Ended {
     let mut heard = false;
     let mut held: Held = None;
     let mut deadline: Option<Instant> = None;
@@ -114,8 +123,14 @@ fn listen(job: &Job<'_>, live: &mut Live, turn: &mut Turn) -> Ended {
         };
         let why = match signal {
             Signal::Cancel => {
+                // ACP「Cancellation」：还没回的权限请求先回 `cancelled`。
+                asking.abandon(live);
                 wind_down(job, live);
                 return Ended::Answer(cancelled());
+            }
+            Signal::Approved { n, outcome } => {
+                asking.answered(job, (live, turn), n, &outcome);
+                continue;
             }
             Signal::ToolCall(McpCall {
                 n,
@@ -154,9 +169,7 @@ fn listen(job: &Job<'_>, live: &mut Live, turn: &mut Turn) -> Ended {
             }
             Signal::Request { id, method, params } => {
                 heard = true;
-                if let Some(ended) = request(job, live, turn, &id, &method, &params) {
-                    return ended;
-                }
+                request(job, (live, turn), asking, (&id, &method, &params));
                 continue;
             }
             Signal::Response { id, outcome } => {
@@ -221,19 +234,17 @@ fn wind_down(job: &Job<'_>, live: &mut Live) {
     }
 }
 
-/// agent 的一个请求：要权限的照设置答（或者交回核心问主人，交 `Some`）；别的回「没有这个方法」。
+/// agent 的一个请求：要权限的照设置答（或者请核心问主人）；别的回「没有这个方法」。
 fn request(
     job: &Job<'_>,
-    live: &mut Live,
-    turn: &mut Turn,
-    id: &Value,
-    method: &str,
-    params: &Value,
-) -> Option<Ended> {
+    (live, turn): (&mut Live, &mut Turn),
+    asking: &mut Asking,
+    (id, method, params): (&Value, &str, &Value),
+) {
     if method != "session/request_permission" {
         live.conn()
             .refuse(id, METHOD_NOT_FOUND, &format!("method not found: {method}"));
-        return None;
+        return;
     }
     let call = params.get("toolCall").cloned().unwrap_or(Value::Null);
     let options: Vec<Value> = params
@@ -244,13 +255,7 @@ fn request(
     if let Some(tool) = call.get("toolCallId").and_then(Value::as_str) {
         turn.asked.insert(tool.to_string());
     }
-    let verdict = permission::judge(
-        job.config.own_tools,
-        &call,
-        &job.names,
-        turn.miyu_calls(),
-        job.can_ask,
-    );
+    let verdict = permission::judge(job.config.own_tools, &call, &job.names, turn.miyu_calls());
     eprintln!(
         "call {}: the agent asked to run {} ({}); {verdict:?}",
         job.call,
@@ -261,32 +266,16 @@ fn request(
             .and_then(Value::as_str)
             .unwrap_or("no kind"),
     );
-    match verdict {
-        Verdict::Allow | Verdict::Reject => {
-            live.conn()
-                .reply(id, &permission::choose(&options, verdict == Verdict::Allow));
-            if verdict == Verdict::Reject
-                && let Some(tool) = call.get("toolCallId").and_then(Value::as_str)
-            {
-                deliver(job, turn.refused(tool));
-            }
-            None
-        }
-        Verdict::Ask => {
-            let n = live.next_ask();
-            let question = permission::question(&live.title, &call, &options, &job.config.language);
-            let fed = turn.ask(n, &question);
-            deliver(job, fed.deltas);
-            let answer = fed.answer.unwrap_or_else(|| json!({}));
-            Some(Ended::Handed(
-                answer,
-                Pending::Permission {
-                    n,
-                    id: id.clone(),
-                    options,
-                },
-            ))
-        }
+    if verdict == Verdict::Ask {
+        asking.ask(job, (live, turn), id, &call, options);
+        return;
+    }
+    live.conn()
+        .reply(id, &permission::choose(&options, verdict == Verdict::Allow));
+    if verdict == Verdict::Reject
+        && let Some(tool) = call.get("toolCallId").and_then(Value::as_str)
+    {
+        deliver(job, turn.refused(tool));
     }
 }
 

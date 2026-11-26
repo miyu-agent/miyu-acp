@@ -226,7 +226,9 @@ impl Server {
             }
         };
         let Some(method) = message.get("method").and_then(Value::as_str) else {
-            return Ok(()); // 回应：扩展不向核心发别的请求，不用对。
+            // 回应：扩展只向核心发 `driver.approve`（核心施工 ACP-8），照编号交给那一次调用；别的不用对。
+            self.approved(&message);
+            return Ok(());
         };
         let params = message.get("params").cloned().unwrap_or(Value::Null);
         match (method, message.get("id")) {
@@ -300,6 +302,29 @@ impl Server {
                 Answer::BadParams(message) => out.refuse(&id, -32602, "bad_params", &message),
             }
         }));
+    }
+
+    /// 核心回了 `driver.approve`（编号 `approve:<调用编号>:<问话编号>`，[`call::approve_id`]）：交给那一次调用；已经结束了的不理。
+    fn approved(&self, message: &Value) {
+        let Some((call, n)) = message
+            .get("id")
+            .and_then(Value::as_str)
+            .and_then(call::approve_of)
+        else {
+            return;
+        };
+        let outcome = match message.get("error") {
+            Some(error) => Err(error.clone()),
+            None => Ok(message.get("result").cloned().unwrap_or(Value::Null)),
+        };
+        if let Some(sender) = self
+            .calls
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .get(call)
+        {
+            sender.send(Signal::Approved { n, outcome }).ok();
+        }
     }
 
     fn cancel(&self, params: &Value) {

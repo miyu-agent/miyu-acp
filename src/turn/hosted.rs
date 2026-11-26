@@ -106,6 +106,23 @@ impl Turn {
         self.close_hosted(deltas);
     }
 
+    /// 请核心问主人之前（核心施工 ACP-8）：这件调用画在哪一块。还开着的照它；没见过的先开块（交回开块的增量）；见过、已经收了的
+    /// 没有（问不了，按拒绝）。
+    pub fn hosted_block(&mut self, call: &Value) -> (Vec<Value>, Option<u64>) {
+        let id = call_id(call);
+        let mut deltas = Vec::new();
+        if !self.hosting.seen.contains(&id) {
+            self.hosted_start(call, &mut deltas);
+        }
+        let index = self
+            .hosting
+            .open
+            .as_ref()
+            .filter(|open| open.id == id)
+            .map(|open| open.index);
+        (deltas, index)
+    }
+
     /// 本包拒了这件调用的权限请求：块还开着的，交一句「被拒了」（`failed`）、收块。
     pub fn refused(&mut self, id: &str) -> Vec<Value> {
         let mut deltas = Vec::new();

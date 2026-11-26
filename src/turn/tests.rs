@@ -195,18 +195,23 @@ fn text_closes_an_open_hosted_block_without_an_outcome() {
 }
 
 #[test]
-fn asking_the_owner_hands_back_an_ask_user_call() {
+fn asking_the_owner_draws_the_tool_once_and_points_at_its_block() {
     let mut turn = turn();
-    let fed = turn.ask(2, &json!({"questions": []}));
-    assert_eq!(fed.handed, Some(Hand::Permission(2)));
+    let call = json!({"toolCallId": "t1", "title": "rm -rf build", "kind": "execute",
+        "rawInput": {"command": "rm -rf build"}});
+    let (deltas, index) = turn.hosted_block(&call);
+    assert_eq!(index, Some(0));
     assert_eq!(
-        fed.deltas[0],
-        json!({"start": {"index": 0, "kind": {"tool_call": {"name": "ask_user"}}}})
+        deltas[0],
+        json!({"start": {"index": 0, "kind": {"hosted_tool": {"name": "execute"}}}})
     );
-    assert_eq!(
-        fed.deltas[2],
-        json!({"private": {"index": 0, "data": {"permission": 2}}})
+    let (again, index) = turn.hosted_block(&call);
+    assert!(again.is_empty(), "开着的不再开：{again:?}");
+    assert_eq!(index, Some(0));
+    turn.update(
+        &json!({"sessionUpdate": "tool_call_update", "toolCallId": "t1", "status": "completed"}),
     );
+    assert_eq!(turn.hosted_block(&call).1, None, "收了的问不了");
 }
 
 #[test]

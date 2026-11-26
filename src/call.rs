@@ -9,6 +9,7 @@
 //!
 //! `driver.cancel` 经 [`Signal::Cancel`] 送进同一个通道。
 
+mod approve;
 mod open;
 mod resume;
 mod talk;
@@ -31,7 +32,8 @@ use crate::rpc::Out;
 use crate::sessions::{Identity, Incoming, Meta};
 pub use crate::signal::Signal;
 use crate::turn;
-use crate::{permission, schema, transcript, workspace};
+use crate::{schema, transcript, workspace};
+pub use approve::{approve_id, approve_of};
 use resume::{resume, resume_pending};
 
 /// 这一次怎么回：照常的 `result`，或者 JSON-RPC 的出错（参数不对）。
@@ -59,8 +61,6 @@ struct Job<'a> {
     /// 请求里的工具（照这个 agent 整过形的）。
     declared: Vec<Tool>,
     names: Names,
-    /// 这一次请求的工具里有 `ask_user`：能交回核心问主人。
-    can_ask: bool,
     signals: &'a Receiver<Signal>,
     sender: &'a Sender<Signal>,
 }
@@ -104,9 +104,6 @@ pub fn run(
         Err(message) => return Answer::BadParams(message),
     };
     let names = Names::new(declared.iter().map(|tool| tool.name.clone()));
-    let can_ask = declared
-        .iter()
-        .any(|tool| tool.name == permission::ASK_TOOL);
     let incoming = incoming(params, model, request);
     if incoming.is_none() {
         eprintln!("call {call}: no usable fingerprint; this agent session will not be kept");
@@ -124,7 +121,6 @@ pub fn run(
         family,
         declared,
         names,
-        can_ask,
         signals,
         sender,
     };

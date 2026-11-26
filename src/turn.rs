@@ -8,7 +8,7 @@
 //! - `session/prompt` 的回应（[`Turn::finish`]）：`end_turn` 正常结束；`max_tokens`、`max_turn_requests` 交一条 `truncated`；
 //!   `refusal` → `content_policy`；`cancelled` → `retryable`。回应带 `usage`（ACP 草案「End-Turn Token Usage」、Claude 适配器
 //!   0.112.0 照它报）的照它记账；没有的不报用量（核心照「没有报告」记，和 `miyu-antigravity` 一样）。
-//! - 要主人确认时（[`Turn::ask`]）交一块 `ask_user` 工具调用，私有数据 `{"permission": n}`，这一次到此结束。
+//! - 要主人确认时不交回（核心施工 ACP-8）：那一件画成供应商侧工具（[`Turn::hosted_block`]），由 `call/approve.rs` 请核心问。
 
 use std::collections::HashSet;
 
@@ -46,8 +46,6 @@ struct Held {
 pub enum Hand {
     /// 一件 Miyu 的工具调用（MCP 那边的编号）。
     Mcp(u64),
-    /// 一次问主人（这个会话里的问话编号）。
-    Permission(u64),
 }
 
 /// 只到了一边，在等另一边。
@@ -302,20 +300,6 @@ impl Turn {
         };
         self.handed_block(&held.name, &held.arguments, &json!({"mcp": held.n}), fed);
         fed.handed = Some(Hand::Mcp(held.n));
-    }
-
-    /// 交回一次问主人：`ask_user` 的参数 `arguments`，问话编号 `n`。
-    pub fn ask(&mut self, n: u64, arguments: &Value) -> Fed {
-        let mut fed = Fed::default();
-        let name = crate::permission::ASK_TOOL;
-        self.handed_block(
-            name,
-            &arguments.to_string(),
-            &json!({"permission": n}),
-            &mut fed,
-        );
-        fed.handed = Some(Hand::Permission(n));
-        fed
     }
 
     fn handed_block(&mut self, name: &str, arguments: &str, private: &Value, fed: &mut Fed) {

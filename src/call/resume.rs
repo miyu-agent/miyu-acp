@@ -1,10 +1,10 @@
-//! 接在活着的会话上说下一步：闲着的（说完了的）是**新的一轮**，挂着的是**工具结果**或者**主人的回答**。照 `miyu-antigravity`
+//! 接在活着的会话上说下一步：闲着的（说完了的）是**新的一轮**，挂着的是**工具结果**。照 `miyu-antigravity`
 //! 的 `call/resume.rs` 搬。
 //!
 //! - [`resume`]：新的几条 user 消息作为一次 `session/prompt` 交过去，读流、交增量。
 //! - [`resume_pending`]：这段会话正挂着一件。再核三样（assistant 那条里恰好一个 `tool_call` 块、私有数据是交回时写的那个；
-//!   tool 那条的 `call_id` 就是这个块的；挂着期间 agent 没说过话），对了才回给 agent（MCP 的结果经挂着的连接回；主人的回答照
-//!   选的那一项回权限请求），接着听同一个 `session/prompt`；哪样不对都作废、改走新开。
+//!   tool 那条的 `call_id` 就是这个块的；挂着期间 agent 没说过话），对了才经挂着的连接回给 agent，接着听同一个
+//!   `session/prompt`；哪样不对都作废、改走新开。
 //!
 //! 两种都：那个 agent 没说话就没了的作废，交 `Err`（原因）；出了错的作废；成功的放回表里（以交回结束的记成挂着）。
 
@@ -15,7 +15,6 @@ use super::talk::{Ended, talk};
 use super::{Job, succeeded, with_sent};
 use crate::failure::Class;
 use crate::live::{Live, Pending};
-use crate::permission;
 use crate::prompt::{self, Media};
 use crate::sessions::{Claimed, Incoming};
 use crate::transcript;
@@ -63,10 +62,8 @@ pub(super) fn resume_pending(
     let Some(pending) = live.take_pending() else {
         return discard(job, id, live, "the kept session had nothing pending".into());
     };
-    let private = match &pending {
-        Pending::Mcp { n, .. } => json!({"mcp": n}),
-        Pending::Permission { n, .. } => json!({"permission": n}),
-    };
+    let Pending::Mcp { n, reply } = pending;
+    let private = json!({"mcp": n});
     let result = match check(job.request, known, &private) {
         Ok(result) => result,
         Err(why) => return discard(job, id, live, why),
@@ -79,9 +76,7 @@ pub(super) fn resume_pending(
             "the agent spoke while something was pending".into(),
         );
     }
-    if let Pending::Mcp { reply, .. } = &pending
-        && reply.is_closed()
-    {
+    if reply.is_closed() {
         return discard(
             job,
             id,
@@ -96,30 +91,12 @@ pub(super) fn resume_pending(
         if live.stray() {
             return Err("the agent spoke while something was pending".to_string());
         }
-        match pending {
-            Pending::Mcp { reply, .. } => reply
-                .send(
-                    &[json!({"type": "text", "text": result.text})],
-                    result.error,
-                )
-                .map_err(|error| format!("the tool server could not take the result: {error}")),
-            Pending::Permission { id, options, .. } => {
-                let answer = match permission::picked(&result.text, &options) {
-                    Some((option, allow)) => {
-                        eprintln!(
-                            "the owner answered the agent's permission request: allow={allow}"
-                        );
-                        permission::selected(&option)
-                    }
-                    None => permission::choose(&options, false),
-                };
-                if live.conn().reply(&id, &answer) {
-                    Ok(())
-                } else {
-                    Err("the agent stopped taking input".to_string())
-                }
-            }
-        }
+        reply
+            .send(
+                &[json!({"type": "text", "text": result.text})],
+                result.error,
+            )
+            .map_err(|error| format!("the tool server could not take the result: {error}"))
     });
     learn_window(job, &turn);
     conclude(job, id, live, incoming, ended, &sent)

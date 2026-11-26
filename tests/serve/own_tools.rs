@@ -1,9 +1,10 @@
 //! 对方自带的工具两档（设计 73 第四节第 7 条）：只读的搜索放行、画成供应商侧工具；别的「只用 Miyu 的工具」回拒绝，「也放行
-//! 对方的工具」交回核心问主人（`ask_user`），照主人选的回 agent；没要权限就跑了的照样画出来。
+//! 对方的工具」请核心问主人（核心施工 ACP-8 的 `driver.approve`），照核心回的选项回 agent；旧核心没有这个方法的照拒绝；
+//! 没要权限就跑了的照样画出来。
 
 use serde_json::{Value, json};
 
-use crate::support::{Core, handed_blocks, request, then, tool, tool_result};
+use crate::support::{Core, request, tool};
 
 fn allow() -> Value {
     json!({"acp.own_tools": "allow"})
@@ -31,12 +32,12 @@ fn a_search_is_allowed_in_both_settings_and_drawn_as_a_hosted_tool() {
 #[test]
 fn only_miyu_tools_refuses_an_edit_and_the_claude_adapter_gets_its_tools_switched_off() {
     let mut core = Core::start("refuse", "claude-acp", "", &json!({}), &[]);
-    let got = core.call_and_collect(
-        "claude-acp",
-        &request("S", "EDIT", &json!([tool("ask_user")])),
-    );
+    let got = core.call_and_collect("claude-acp", &request("S", "EDIT", &json!([tool("read")])));
     assert!(got.text().ends_with("edit: no"), "{}", got.text());
-    assert!(got.starts("tool_call").is_empty(), "不问主人");
+    assert!(
+        got.starts("tool_call").is_empty() && got.asked.is_empty(),
+        "不问主人"
+    );
     let outcome = got
         .deltas
         .iter()
@@ -52,42 +53,85 @@ fn only_miyu_tools_refuses_an_edit_and_the_claude_adapter_gets_its_tools_switche
 }
 
 #[test]
-fn also_allowing_asks_the_owner_through_ask_user_and_follows_the_answer() {
+fn also_allowing_asks_the_core_and_follows_its_answer() {
     for (answer, expected) in [
-        ("Allow", "edit: yes"),
-        ("Reject", "edit: no"),
-        ("something else", "edit: no"),
+        (json!({"decision": "once", "option": "yes"}), "edit: yes"),
+        (
+            json!({"decision": "deny", "option": "no", "reason": "不要"}),
+            "edit: no",
+        ),
+        (
+            json!({"decision": "deny", "option": "no", "auto": "unattended"}),
+            "edit: no",
+        ),
+        (json!({"decision": "cancelled"}), "edit: cancelled"),
     ] {
         let mut core = Core::start("ask", "fake", "", &allow(), &[]);
-        let first = request("S", "EDIT", &json!([tool("ask_user")]));
-        let handed = core.ask("c1", &first);
-        let calls = handed.starts("tool_call");
-        assert_eq!(calls.len(), 1, "{:?}", handed.deltas);
-        assert_eq!(calls[0]["kind"]["tool_call"]["name"], "ask_user");
-        let blocks = handed_blocks(&handed, "call_9");
-        let question: Value = serde_json::from_str(blocks[0]["args"].as_str().unwrap()).unwrap();
-        let text = question["questions"][0]["question"].as_str().unwrap();
+        core.call_with(
+            "c1",
+            "c1",
+            &request("S", "EDIT", &json!([tool("read")])),
+            "fake",
+            &json!({}),
+        );
+        let result = json!({"result": answer.clone()});
+        let got = core.collect_answering("c1", "c1", &|_| result.clone());
+        assert!(got.text().ends_with(expected), "{answer}: {}", got.text());
         assert!(
-            text.contains("Fake Agent")
-                && text.contains("Edit notes.txt")
-                && text.contains("sandbox"),
-            "{text}"
+            got.starts("tool_call").is_empty(),
+            "不交回 ask_user：{:?}",
+            got.deltas
+        );
+        let hosted = got.starts("hosted_tool");
+        assert_eq!(hosted.len(), 1, "{:?}", got.deltas);
+        assert_eq!(got.asked.len(), 1, "问一次");
+        let asked = &got.asked[0];
+        assert_eq!(asked["index"], hosted[0]["index"], "画在那一块上");
+        assert_eq!(
+            (&asked["access"], &asked["title"], &asked["text"]),
+            (
+                &json!("write"),
+                &json!("Edit notes.txt"),
+                &json!(r#"{"path":"notes.txt"}"#)
+            )
         );
         assert_eq!(
-            question["questions"][0]["options"][0],
-            json!({"label": "Allow"})
+            asked["options"],
+            json!([
+                {"id": "yes", "name": "Allow", "kind": "allow_once"},
+                {"id": "always", "name": "Always allow", "kind": "allow_always"},
+                {"id": "no", "name": "Reject", "kind": "reject_once"}
+            ])
         );
-        let result = format!("\"{text}\" = {answer}\n\nGo on with these answers in mind.");
-        let done = core.ask("c2", &then(&first, &blocks, tool_result("call_9", &result)));
-        assert!(done.text().ends_with(expected), "{answer}: {}", done.text());
+        let start = got.deltas.iter().position(|delta| {
+            delta
+                .get("start")
+                .is_some_and(|start| start["kind"].get("hosted_tool").is_some())
+        });
+        assert!(start.is_some(), "先开块再问");
     }
 }
 
 #[test]
-fn also_allowing_without_anyone_to_ask_refuses() {
-    let mut core = Core::start("noask", "fake", "", &allow(), &[]);
-    let got = core.ask("c1", &request("S", "EDIT", &json!([tool("read")])));
+fn an_older_core_without_the_method_refuses_like_only_miyu_tools() {
+    let mut core = Core::start("old", "fake", "", &allow(), &[]);
+    core.call_with(
+        "c1",
+        "c1",
+        &request("S", "EDIT", &json!([tool("read")])),
+        "fake",
+        &json!({}),
+    );
+    let missing = json!({"error": {"code": -32601, "message": "unknown method", "data": {"reason": "unknown_method"}}});
+    let got = core.collect_answering("c1", "c1", &|_| missing.clone());
     assert!(got.text().ends_with("edit: no"), "{}", got.text());
+    let outcome = got
+        .deltas
+        .iter()
+        .find_map(|delta| delta.get("outcome"))
+        .unwrap();
+    assert_eq!(outcome["failed"], true, "写明被拒：{outcome}");
+    assert!(outcome["text"].as_str().unwrap().contains("refused"));
 }
 
 #[test]

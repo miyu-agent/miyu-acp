@@ -35,9 +35,10 @@ pub struct Core {
     runtime: PathBuf,
 }
 
-/// 一次调用收到的：增量（照先后）和回应。
+/// 一次调用收到的：增量（照先后）、请核心问主人的 `driver.approve` 的参数（照先后）和回应。
 pub struct Collected {
     pub deltas: Vec<Value>,
+    pub asked: Vec<Value>,
     pub response: Value,
 }
 
@@ -280,11 +281,31 @@ impl Core {
         self.collect(id, id)
     }
 
-    /// 一直读到请求 `id` 回应了，交增量和回应。
-    pub fn collect(&self, id: &str, call: &str) -> Collected {
+    /// 一直读到请求 `id` 回应了，交增量和回应。请核心问主人的算没想到的。
+    pub fn collect(&mut self, id: &str, call: &str) -> Collected {
+        self.collect_answering(id, call, &|asked| panic!("没想到要问主人：{asked}"))
+    }
+
+    /// 同 [`Core::collect`]，请核心问主人的（`driver.approve`）照 `answer` 回：交回回应里 `id` 以外的格（`result` 或 `error`）。
+    pub fn collect_answering(
+        &mut self,
+        id: &str,
+        call: &str,
+        answer: &dyn Fn(&Value) -> Value,
+    ) -> Collected {
         let mut deltas = Vec::new();
+        let mut asked = Vec::new();
         loop {
             let message = self.recv();
+            if message["method"] == "driver.approve" {
+                assert_eq!(message["params"]["call"], call, "{message}");
+                let mut reply = answer(&message["params"]);
+                reply["jsonrpc"] = json!("2.0");
+                reply["id"] = message["id"].clone();
+                asked.push(message["params"].clone());
+                self.send(&reply);
+                continue;
+            }
             if message["method"] == "driver.delta" {
                 assert_eq!(message["params"]["call"], call, "{message}");
                 deltas.extend(
@@ -297,6 +318,7 @@ impl Core {
             } else if message["id"] == id {
                 return Collected {
                     deltas,
+                    asked,
                     response: message,
                 };
             } else {

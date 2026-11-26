@@ -41,6 +41,13 @@ pub enum Signal {
     Closed,
     /// agent 经 MCP 服务调了一件 Miyu 的工具。
     ToolCall(McpCall),
+    /// 核心回了一条请它问主人的 `driver.approve`（核心施工 ACP-8）：这个会话里的问话编号、`result` 或者 `error`。
+    Approved {
+        /// 问话编号。
+        n: u64,
+        /// 回应。
+        outcome: Result<Value, Value>,
+    },
     /// 核心发了 `driver.cancel`，或者扩展要退出了。
     Cancel,
 }
