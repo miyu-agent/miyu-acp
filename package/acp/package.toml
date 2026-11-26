@@ -1,0 +1,96 @@
+# ACP agent 当模型供应商（包编号 acp，仓库、程序叫 miyu-acp）：登记模型驱动 acp/acp，把 ACP 官方登记表里的 agent 程序
+# （Claude 适配器、Antigravity、Gemini CLI 等）和设置里手写的 agent 当模型用。模型名写 agent 的编号：acp/claude-acp、
+# acp/claude-acp/<agent 报的模型>。设计见核心的设计 73 第四节。
+
+[package]
+version = "0.1.0"
+protocol = [1, 1]
+miyu = "2026.11.0-rc.2.6"
+name = { en = "ACP agents", zh = "ACP 智能体" }
+summary = { en = "Use agent programs that speak the Agent Client Protocol (Claude Code, Antigravity, Gemini CLI and more) as model providers", zh = "把支持 Agent Client Protocol 的智能体程序（Claude Code、Antigravity、Gemini CLI 等）用作模型供应商" }
+author = "SHORiN-KiWATA"
+upstream = "https://github.com/miyu-agent/miyu-acp"
+license = "AGPL-3.0-or-later"
+icon = "plug"
+# 带本机程序；进程组、信号、本机套接字照 Unix 写，只支持 Linux、macOS。
+systems = ["linux", "macos"]
+targets = ["linux-x86_64", "linux-aarch64", "macos-aarch64"]
+
+[command]
+# 不叫 acp：核心要加内置的 `miyu acp`（设计 73 第五节），同名的以内置的为准。
+name = "acp-agents"
+program = "miyu-acp"
+about = { en = "ACP agents as model providers (started by the Miyu core)", zh = "把 ACP 智能体用作模型供应商（由 Miyu 核心启动）" }
+
+[process]
+args = ["serve"]
+# model.driver：提供驱动 acp/acp；network：取登记表、下载 agent，agent 自己也要连它的服务。
+capabilities = ["model.driver", "network"]
+
+[[driver]]
+name = "acp"
+cache = "best_effort"
+# 用密钥登录的 agent（Gemini API 密钥这类）照供应商里填的 key 登录；不填的照 agent 自己的登录。
+key = "optional"
+# 不用地址：agent 自己连它的服务。
+base_url = "none"
+# 图、文件照 ACP 的内容块交给收得下的 agent。
+images = true
+files = true
+# 对方自带的、只读的工具（搜索、抓网页、思考）照实画成供应商侧工具；名字照 agent 报的，常见的几个写在这里。
+hosted = ["WebSearch", "WebFetch", "search_web", "google_web_search", "web_fetch", "search", "fetch", "think"]
+# 头一次用到要下载、装 agent，有的 agent 不流思考的字：空闲时限放宽。
+quiet_secs = 600
+
+[providers.acp]
+name = { en = "ACP agents", zh = "ACP 智能体" }
+driver = "acp/acp"
+
+[settings.own_tools]
+type = "option"
+default = "miyu_only"
+applies = "new_session"
+name = { en = "Agent's own tools", zh = "对方自带的工具" }
+description = { en = "Whether the agent may run its own tools besides Miyu's.", zh = "除了 Miyu 的工具以外，是否允许智能体使用它自带的工具。" }
+choices = [
+    { value = "miyu_only", name = { en = "Only Miyu's tools", zh = "只用 Miyu 的工具" }, description = { en = "Read-only search and web fetching by the agent are allowed; everything else the agent asks to run is refused.", zh = "智能体自带的搜索、抓取网页这类只读工具可以使用，其他工具在它请求权限时一律拒绝。" } },
+    { value = "allow", name = { en = "Also allow the agent's tools", zh = "也放行对方的工具" }, description = { en = "When the agent asks to run its own tool, Miyu asks you first. These tools run commands and change files outside Miyu's sandbox and permissions.", zh = "智能体请求使用它自带的工具时，Miyu 会先问你。这些工具运行命令、修改文件都不在 Miyu 的沙盒和权限管理之内。" } },
+]
+
+[settings.keep_seconds]
+type = "int"
+min = 0
+max = 86400
+default = 600
+applies = "now"
+name = { en = "Process retention after a turn (seconds)", zh = "对话结束后进程保留时长（秒）" }
+description = { en = "After a turn ends, how long the agent process is kept for the next turn of the same conversation. 0: do not keep it.", zh = "一轮对话结束后，智能体进程保留多久，用来等待同一段对话的下一轮；超过这个时间就结束进程。填 0 表示不保留。" }
+
+[settings.tool_wait_seconds]
+type = "int"
+min = 60
+max = 86400
+default = 3600
+applies = "now"
+name = { en = "Tool call timeout (seconds)", zh = "工具调用超时时长（秒）" }
+description = { en = "How long a tool call handed back to Miyu may take, including time spent waiting for you to confirm, before the agent's process is stopped.", zh = "智能体把一次工具调用交给 Miyu 之后最多等待多久。核心执行工具的时间和等待你确认的时间都计算在内。" }
+
+[settings.agents]
+type = "list"
+element = "record"
+title = "name"
+applies = "now"
+name = { en = "Other agents", zh = "其他智能体" }
+description = { en = "Agents that are not in the official ACP registry. Use one as the model acp/<name>.", zh = "官方 ACP 登记表以外的智能体。使用时把模型写成 acp/<名字>。" }
+
+[settings.agents.fields.name]
+type = "text"
+max = 32
+name = { en = "Name", zh = "名字" }
+description = { en = "Starts with a lowercase letter; lowercase letters, digits, - and _ only.", zh = "以小写字母开头，只能使用小写字母、数字、- 和 _。" }
+
+[settings.agents.fields.command]
+type = "text"
+max = 2000
+name = { en = "Command", zh = "启动命令" }
+description = { en = "One line: the program and its arguments, separated by spaces. Environment variables go first as NAME=value; use quotes around words with spaces; a leading ~ is your home folder.", zh = "写成一行：程序和参数，用空格隔开。环境变量写在最前面，格式是 名字=值；含空格的词用引号括起来；开头的 ~ 表示家目录。" }

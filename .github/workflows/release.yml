@@ -1,0 +1,37 @@
+# 发版（照官方打包模板）：推 `v*` 标签（v 加上 package/acp/package.toml 里的版本）时一种系统打一个 `.miyu`
+# （`miyu pkg pack` 打的，软件源只收这种），传进这个标签的 Release。仓库打了 `miyu-package` 话题，软件源每天收一次，
+# 收进索引以后 `miyu pkg install acp` 就装得上（包编号 `acp`，程序叫 miyu-acp）。
+# 包里是本仓库编的 miyu-acp 程序加 package/acp/ 里的清单；许可证随包发（AGPL）。
+name: release
+
+on:
+  push:
+    tags: ["v*"]
+
+jobs:
+  pack:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-24.04
+            target: linux-x86_64
+          - os: ubuntu-24.04-arm
+            target: linux-aarch64
+          - os: macos-latest
+            target: macos-aarch64
+    uses: miyu-agent/packages/.github/workflows/pack.yml@main
+    permissions:
+      contents: write
+    with:
+      package: acp
+      folder: package/acp
+      target: ${{ matrix.target }}
+      runs-on: ${{ matrix.os }}
+      build: |
+        set -euo pipefail
+        rustup toolchain install
+        cargo build --release --locked
+        mkdir -p package/acp/bin
+        cp target/release/miyu-acp package/acp/bin/miyu-acp
+        cp LICENSE package/acp/LICENSE

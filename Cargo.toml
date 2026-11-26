@@ -1,0 +1,45 @@
+[package]
+name = "miyu-acp"
+description = "Miyu 的模型驱动扩展：把 ACP 官方登记表里的 agent 程序当模型供应商"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.97"
+license = "AGPL-3.0-or-later"
+publish = false
+
+[[bin]]
+name = "miyu-acp"
+path = "src/main.rs"
+
+[dependencies]
+# 核心的协议、ACP、MCP 都是一行一条的 JSON。preserve_order：工具参数照 agent 给的先后原样转出去。
+serde_json = { version = "1", features = ["preserve_order"] }
+# 回答里的 `sent`、登记表下载的压缩包核对 `sha256`。
+sha2 = "0.11"
+# 核心交的图、文件是 base64，ACP 的图、音频、二进制资源也是 base64：原样转交，要解开的只有核对用的那几处。
+base64 = "0.22"
+# 取登记表、下载 agent 的压缩包：纯 Rust 的 HTTPS（rustls），走系统的代理设置（和 miyu-ocr 一样）。
+ureq = "3.5.1"
+# 解开登记表里 binary 分发的压缩包：zip、tar.gz、tar.bz2（2026-11-26 登记表里只有这三种和裸程序）。都用纯 Rust 的实现。
+zip = { version = "9.5", default-features = false, features = ["deflate-flate2"] }
+flate2 = "1.1"
+tar = "0.4"
+bzip2 = "0.6"
+
+[target.'cfg(unix)'.dependencies]
+# 对 agent 的进程组发 SIGTERM、SIGKILL（unsafe_code = "forbid"，不直接调 libc）。
+nix = { version = "0.31", default-features = false, features = ["signal", "process"] }
+
+[lints.rust]
+unsafe_code = "forbid"
+unused_must_use = "deny"
+
+[lints.clippy]
+pedantic = { level = "warn", priority = -1 }
+module_name_repetitions = "allow"
+unwrap_used = "deny"
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
+strip = true

@@ -1,0 +1,45 @@
+# CI：Linux、macOS 各跑格式、clippy、文档、测试（本包只支持这两种系统：进程组、信号、Unix 套接字）。
+# 集成测试用假 agent（tests/fake_acp.py，要 python3，两种机器都自带），不碰真的 agent 程序。
+name: CI
+
+on:
+  push:
+    branches: [main, "step/**"]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  check:
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-24.04, ubuntu-24.04-arm, macos-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: 装上 rust-toolchain.toml 钉住的工具链
+        run: rustup toolchain install
+      - name: 取编译缓存
+        uses: Swatinem/rust-cache@v2
+        with:
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+      - name: 格式
+        run: cargo fmt --all --check
+      - name: clippy
+        run: cargo clippy --all-targets --locked -- -D warnings
+      - name: 文档
+        run: cargo doc --no-deps --locked
+        env:
+          RUSTDOCFLAGS: -D warnings
+      - name: 测试
+        run: cargo test --locked
+      - name: 没留下进程
+        run: |
+          if pgrep -af "miyu-acp (serve|mcp)|fake_acp"; then
+            echo "测试留下了进程" >&2
+            exit 1
+          fi
