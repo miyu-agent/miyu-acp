@@ -5,8 +5,9 @@
 //! - 参数后到的（Claude 适配器先报空的、输入写完再补 `rawInput`）：块还开着、还没交过参数的补交一次。
 //! - `completed`：有结果的交 `outcome`（`content` 里的字，没有的用 `rawOutput`），再 `end`；`failed`：`outcome` 带 `failed: true`。
 //! - 结果先截到 [`OUTCOME_LIMIT`]。不带 `private`。这件没收的时候来了别的（正文、下一件工具、回应、交回的调用）：收掉它，不交结果。
-//! - 不是只读类、又没要过权限就跑了（`in_progress`、`completed`）的，记一行警告（设计第四节第 7 条「照样画成供应商侧工具，并在包的
-//!   日志里记一条警告」）。
+//! - 会动本机的（不是只读的搜索、抓网页、思考，也不是 `read`）又没要过权限就跑了（`in_progress`、`completed`）的，记一行警告
+//!   （设计第四节第 7 条「照样画成供应商侧工具，并在包的日志里记一条警告」），结果前面再写一句给人看的「未经确认已执行」
+//!   （[`unasked_note`]，施工 ACP-10：不静默）。没有结果的也交这一句。
 
 use std::collections::HashSet;
 
@@ -30,6 +31,8 @@ pub(super) struct Hosting {
     pub(super) seen: HashSet<String>,
     /// 记过警告的调用。
     warned: HashSet<String>,
+    /// 给人看的字写中文。
+    pub(super) zh: bool,
 }
 
 #[derive(Debug)]
@@ -37,7 +40,8 @@ struct OpenTool {
     id: String,
     index: u64,
     has_args: bool,
-    readonly: bool,
+    /// 跑之前该要权限：不是只读类、也不是 `read`。
+    consent: bool,
 }
 
 impl Turn {
@@ -62,7 +66,7 @@ impl Turn {
             id,
             index,
             has_args: false,
-            readonly: permission::readonly(update),
+            consent: needs_consent(update),
         });
         self.hosted_update(update, deltas);
     }
@@ -89,17 +93,23 @@ impl Turn {
             push_text(deltas, open.index, &input.to_string());
         }
         let index = open.index;
+        let note = self
+            .hosting
+            .warned
+            .contains(&id)
+            .then(|| unasked_note(self.hosting.zh));
+        let text = outcome_text(update).filter(|text| !text.is_empty());
         match status {
             Some("completed") => {
-                if let Some(text) = outcome_text(update).filter(|text| !text.is_empty()) {
+                if let Some(text) = noted(note, text) {
                     deltas.push(json!({"outcome": {"index": index, "text": cut(&text)}}));
                 }
             }
             Some("failed") => {
-                let text = outcome_text(update).filter(|text| !text.is_empty());
-                let said = text.as_deref().unwrap_or("failed");
+                let text = noted(note, Some(text.unwrap_or_else(|| "failed".into())));
+                let said = text.unwrap_or_default();
                 deltas
-                    .push(json!({"outcome": {"index": index, "text": cut(said), "failed": true}}));
+                    .push(json!({"outcome": {"index": index, "text": cut(&said), "failed": true}}));
             }
             _ => return,
         }
@@ -133,12 +143,12 @@ impl Turn {
         deltas
     }
 
-    /// 不是只读类、没要过权限就跑了的，记一行警告（一件记一次）。
+    /// 该要权限、没要就跑了的，记一行警告（一件记一次）。
     fn warn_unasked(&mut self, id: &str, status: Option<&str>) {
         let running = matches!(status, Some("in_progress" | "completed"));
-        let readonly = self.hosting.open.as_ref().is_some_and(|open| open.readonly);
+        let consent = self.hosting.open.as_ref().is_some_and(|open| open.consent);
         if running
-            && !readonly
+            && consent
             && !self.asked.contains(id)
             && self.hosting.warned.insert(id.to_string())
         {
@@ -153,6 +163,31 @@ impl Turn {
         if let Some(open) = self.hosting.open.take() {
             deltas.push(json!({"end": {"index": open.index}}));
         }
+    }
+}
+
+/// 跑之前该要权限的：不是只读的搜索、抓网页、思考（[`permission::readonly`]），也不是 `kind: "read"`（读文件不动本机，各家
+/// 的「每次都问」那一档也不问它）。
+fn needs_consent(call: &Value) -> bool {
+    !permission::readonly(call) && call.get("kind").and_then(Value::as_str) != Some("read")
+}
+
+/// 没要权限就跑了的那件，结果前面给人看的一句（照界面语言；协议里供应商侧工具的结果模型和人都看，没有只给人的一格）。
+#[must_use]
+pub fn unasked_note(zh: bool) -> &'static str {
+    if zh {
+        "未经确认已执行：对方没有请求权限，自己运行了这个工具。"
+    } else {
+        "Ran without confirmation: the agent ran this tool without asking for permission."
+    }
+}
+
+/// 有提醒的接在结果前面；都没有的是 `None`。
+fn noted(note: Option<&str>, text: Option<String>) -> Option<String> {
+    match (note, text) {
+        (Some(note), Some(text)) => Some(format!("{note}\n{text}")),
+        (Some(note), None) => Some(note.to_string()),
+        (None, text) => text,
     }
 }
 

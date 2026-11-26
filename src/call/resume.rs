@@ -41,7 +41,7 @@ pub(super) fn resume(
         }
     };
     let params = json!({"sessionId": live.session, "prompt": prompt});
-    let mut turn = Turn::new(job.names.clone(), &live.login);
+    let mut turn = Turn::new(job.names.clone(), &live.login).speaking(&job.config.language);
     let ended = talk(job, &mut live, &mut turn, |live| send_prompt(live, &params));
     learn_window(job, &turn);
     conclude(job, id, live, incoming, ended, &params["prompt"])
@@ -85,7 +85,8 @@ pub(super) fn resume_pending(
         );
     }
     let memory = std::mem::take(&mut live.memory);
-    let mut turn = Turn::resume(job.names.clone(), &live.login, memory);
+    let mut turn =
+        Turn::resume(job.names.clone(), &live.login, memory).speaking(&job.config.language);
     let sent = json!(result.text);
     let ended = talk(job, &mut live, &mut turn, move |live| {
         if live.stray() {
