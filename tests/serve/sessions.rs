@@ -67,3 +67,21 @@ fn another_system_prompt_is_another_conversation() {
     core.ask("c2", &second);
     assert_eq!(core.got("session/new").len(), 2);
 }
+
+#[test]
+fn a_one_off_request_is_not_kept_for_a_next_turn() {
+    // 施工 ACP-12：起标题、回顾这类辅助请求不带 system、不带工具、只有一条 user，用完就没人再接着说。以前照样登记、进程留到
+    // `acp.keep_seconds`，占着表里的位置，多开几段对话时把真在用的挤掉。
+    let mut core = Core::start("oneoff", "fake", "", &json!({}), &[]);
+    let first = request("", "title this", &json!([]));
+    let got = core.ask("c1", &first);
+    assert!(got.result().get("error").is_none(), "{}", got.response);
+    let next = then(
+        &first,
+        &json!([{"type": "text", "text": got.text()}]),
+        user("two"),
+    );
+    core.ask("c2", &next);
+    assert_eq!(core.got("session/new").len(), 2, "没登记，接不上");
+    assert_eq!(core.got("initialize").len(), 2, "进程没留着");
+}
