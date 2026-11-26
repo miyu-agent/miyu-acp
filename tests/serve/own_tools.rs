@@ -135,7 +135,7 @@ fn an_older_core_without_the_method_refuses_like_only_miyu_tools() {
 }
 
 #[test]
-fn a_tool_run_without_asking_is_still_drawn() {
+fn a_tool_run_without_asking_is_drawn_and_marked_for_people() {
     let mut core = Core::start("silent", "fake", "", &json!({}), &[]);
     let got = core.ask("c1", &request("S", "SILENT", &json!([])));
     let hosted = got.starts("hosted_tool");
@@ -145,5 +145,39 @@ fn a_tool_run_without_asking_is_still_drawn() {
         .iter()
         .find_map(|delta| delta.get("outcome"))
         .unwrap();
-    assert_eq!(outcome["text"], "a b c");
+    assert_eq!(
+        outcome["text"],
+        format!("{}\na b c", miyu_acp::turn::unasked_note(false)),
+        "不静默：写明未经确认已执行"
+    );
+}
+
+/// 施工 ACP-10：对方起在不问的模式（Claude 适配器没有设置时是 `auto`，主人本机设了 `bypassPermissions` 的照它）。开会话以后
+/// 切到 `default`，改文件之前就来要权限；不切的话它直接改了（修以前的真人实测）。
+#[test]
+fn the_agent_is_switched_to_asking_before_its_own_tools_run() {
+    let mut core = Core::start("modes", "fake", "modes", &allow(), &[]);
+    core.call_with(
+        "c1",
+        "c1",
+        &request("S", "EDIT", &json!([tool("read")])),
+        "fake",
+        &json!({}),
+    );
+    let once = json!({"result": {"decision": "once", "option": "yes"}});
+    let got = core.collect_answering("c1", "c1", &|_| once.clone());
+    assert!(got.text().ends_with("edit: yes"), "{}", got.text());
+    assert_eq!(got.asked.len(), 1, "经核心问主人");
+    let switched = core.got("session/set_mode");
+    assert_eq!(switched.len(), 1, "{switched:?}");
+    assert_eq!(switched[0]["modeId"], "default");
+
+    let mut core = Core::start("modes-only", "fake", "modes", &json!({}), &[]);
+    let got = core.ask("c1", &request("S", "EDIT", &json!([tool("read")])));
+    assert!(
+        got.text().ends_with("edit: no"),
+        "只用 Miyu 的工具那一档照样先切、再拒：{}",
+        got.text()
+    );
+    assert_eq!(core.noted("mode"), vec![json!("default")]);
 }

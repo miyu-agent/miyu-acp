@@ -3,9 +3,11 @@
 //!
 //! - [`Conn`]：一个 agent 进程和它那一条连接：发请求（等回应的、回应送进这一轮信号的）、发通知、回 agent 的请求。
 //! - [`handshake`]：`initialize`、`authenticate`、`session/new`（`session/resume`）怎么写、怎么读。
+//! - [`modes`]：开会话以后把对方的权限模式切到「每次都问」。
 
 mod conn;
 pub mod handshake;
+pub mod modes;
 
 pub use conn::{Conn, Failure};
 

@@ -58,8 +58,15 @@ fn text_and_thoughts_become_blocks_split_by_kind_and_message() {
 fn usage_comes_from_the_answer_and_context_from_the_last_usage_update() {
     let mut turn = turn();
     turn.update(&json!({"sessionUpdate": "usage_update", "used": 1000, "size": 200_000}));
-    turn.update(&json!({"sessionUpdate": "usage_update", "used": 5300, "size": 200_000, "cost": {"amount": 0.1, "currency": "USD"}}));
+    assert_eq!(turn.model(), None);
+    turn.update(&json!({"sessionUpdate": "usage_update", "used": 5300, "size": 200_000, "cost": {"amount": 0.1, "currency": "USD"},
+        "_meta": {"_claude/model": "claude-haiku-5-5"}}));
     assert_eq!(turn.window(), Some(200_000));
+    assert_eq!(
+        turn.model(),
+        Some("claude-haiku-5-5"),
+        "Claude 适配器在 _meta 里报真用的模型"
+    );
     let fed = turn.finish(&json!({"stopReason": "end_turn", "usage": {
         "inputTokens": 10, "outputTokens": 20, "cachedReadTokens": 5000, "cachedWriteTokens": 3, "thoughtTokens": 7, "totalTokens": 5040
     }}));
@@ -178,6 +185,45 @@ fn the_agent_s_own_tools_become_hosted_blocks_with_late_input_and_outcome() {
             json!({"end": {"index": 1}}),
         ]
     );
+}
+
+/// 施工 ACP-10：没要权限就跑了的会动本机的工具，结果前面写明「未经确认已执行」（照界面语言）；读文件、搜索不写；问过的不写。
+#[test]
+fn tools_run_without_asking_are_marked_for_people() {
+    let mut turn = turn().speaking("zh");
+    turn.asked.insert("asked".into());
+    let deltas = all(
+        &mut turn,
+        &[
+            json!({"sessionUpdate": "tool_call", "toolCallId": "b", "name": "Bash", "kind": "execute", "status": "in_progress"}),
+            json!({"sessionUpdate": "tool_call_update", "toolCallId": "b", "status": "completed", "rawOutput": "hi"}),
+            json!({"sessionUpdate": "tool_call", "toolCallId": "r", "name": "Read", "kind": "read", "status": "in_progress"}),
+            json!({"sessionUpdate": "tool_call_update", "toolCallId": "r", "status": "completed", "rawOutput": "fn main"}),
+            json!({"sessionUpdate": "tool_call", "toolCallId": "e", "name": "Edit", "kind": "edit", "status": "in_progress"}),
+            json!({"sessionUpdate": "tool_call_update", "toolCallId": "e", "status": "failed"}),
+            json!({"sessionUpdate": "tool_call", "toolCallId": "w", "name": "Write", "kind": "edit", "status": "in_progress"}),
+            json!({"sessionUpdate": "tool_call_update", "toolCallId": "w", "status": "completed"}),
+            json!({"sessionUpdate": "tool_call", "toolCallId": "asked", "name": "Bash", "kind": "execute", "status": "in_progress"}),
+            json!({"sessionUpdate": "tool_call_update", "toolCallId": "asked", "status": "completed", "rawOutput": "ok"}),
+        ],
+    );
+    let note = unasked_note(true);
+    let outcomes: Vec<&Value> = deltas
+        .iter()
+        .filter_map(|delta| delta.get("outcome"))
+        .collect();
+    assert_eq!(
+        outcomes,
+        [
+            &json!({"index": 0, "text": format!("{note}\nhi")}),
+            &json!({"index": 1, "text": "fn main"}),
+            &json!({"index": 2, "text": format!("{note}\nfailed"), "failed": true}),
+            &json!({"index": 3, "text": note}),
+            &json!({"index": 4, "text": "ok"}),
+        ]
+    );
+    assert!(note.starts_with("未经确认已执行"));
+    assert!(unasked_note(false).starts_with("Ran without confirmation"));
 }
 
 #[test]

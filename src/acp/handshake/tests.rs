@@ -73,8 +73,8 @@ fn the_system_prompt_goes_where_the_agent_takes_it() {
         json!({"mode": "override", "content": [{"type": "text", "text": "SYS"}]})
     );
     assert_eq!(
-        over["_meta"]["claudeCode"]["options"]["tools"],
-        json!(["WebSearch", "WebFetch"])
+        over["_meta"]["claudeCode"]["options"],
+        json!({"allowDangerouslySkipPermissions": false, "tools": ["WebSearch", "WebFetch"]})
     );
     assert_eq!(over["mcpServers"], json!([]));
     assert_eq!(over["cwd"], "/tmp/work");
@@ -107,7 +107,7 @@ fn the_system_prompt_goes_where_the_agent_takes_it() {
 }
 
 #[test]
-fn letting_the_agent_s_own_tools_run_drops_the_restrictions() {
+fn letting_the_agent_s_own_tools_run_drops_the_restrictions_but_never_bypasses_asking() {
     let cwd = PathBuf::from("/w");
     let open = session_params(
         &cwd,
@@ -117,7 +117,11 @@ fn letting_the_agent_s_own_tools_run_drops_the_restrictions() {
         Family::Claude,
         OwnTools::Allow,
     );
-    assert!(open.get("_meta").is_none());
+    assert_eq!(
+        open["_meta"],
+        json!({"claudeCode": {"options": {"allowDangerouslySkipPermissions": false}}}),
+        "自带的工具不关，但不许照主人本机的设置跳过权限"
+    );
     let agy = session_params(
         &cwd,
         None,

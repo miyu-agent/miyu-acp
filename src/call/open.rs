@@ -1,6 +1,6 @@
 //! 新开一个 ACP 会话（设计 73 第四节第 2～5 条）：找到、装好 agent → 起进程 → `initialize` →（供应商填了 key 的）`authenticate`
-//! → `session/new`（系统提示词照能力交、Miyu 的工具经 `mcpServers` 交、认得的 agent 关掉自带的工具）→ 选模型 → 整份历史转写成
-//! 第一次提问。成功了、认得出对话的登记进表，agent 留着等下一轮。
+//! → `session/new`（系统提示词照能力交、Miyu 的工具经 `mcpServers` 交、认得的 agent 关掉自带的工具）→ 选模型 → 权限模式切到
+//! 「每次都问」（[`modes`]，施工 ACP-10）→ 整份历史转写成第一次提问。成功了、认得出对话的登记进表，agent 留着等下一轮。
 //!
 //! 要登录时（`session/new` 回 `-32000`，或者 `session/prompt` 回）这一次回 `auth`：说清这个 agent 要先登录、登录方式有哪些、
 //! 去哪看；不替主人走 OAuth，不碰别家程序的凭据。
@@ -14,6 +14,7 @@ use serde_json::{Value, json};
 use super::talk::{Ended, talk};
 use super::{Job, Signal, cancelled, keep, succeeded, with_sent};
 use crate::acp::handshake::{self, Caps, SystemMode};
+use crate::acp::modes;
 use crate::acp::{Conn, Failure};
 use crate::agents::{self, Agent};
 use crate::failure::{self, Class};
@@ -54,7 +55,7 @@ pub(super) fn fresh(job: &Job<'_>, incoming: Option<Incoming>) -> Value {
         Err(error) => return failed(Class::Unclassified, &error.to_string()),
     };
     let params = json!({"sessionId": live.session, "prompt": prompt});
-    let mut turn = Turn::new(job.names.clone(), &live.login);
+    let mut turn = Turn::new(job.names.clone(), &live.login).speaking(&job.config.language);
     let ended = talk(job, &mut live, &mut turn, |live| send_prompt(live, &params));
     learn_window(job, &turn);
     let (answer, pending) = match ended {
@@ -90,6 +91,7 @@ pub(super) fn learn_window(job: &Job<'_>, turn: &Turn) {
             &job.agent,
             &Learned {
                 window: Some((job.model.clone(), window)),
+                resolved: turn.model().map(str::to_string),
                 ..Learned::default()
             },
         );
@@ -201,6 +203,7 @@ fn open(job: &Job<'_>, agent: &Agent) -> Result<(Live, Option<String>), Value> {
     if let Some(model) = &job.model {
         pick_model(agent, &found, model, &step)?;
     }
+    ask_every_time(agent, &found.session, &session, &step)?;
     let in_prompt = (caps.system == SystemMode::InPrompt).then_some(system);
     let opened = Opened {
         session: found.session,
@@ -267,6 +270,45 @@ fn pick_model(
     Ok(())
 }
 
+/// 对方报了权限模式的，切到「每次都问」的那一档（[`modes`]）。切不了、认不出哪一档的照原样用、日志里记一句：对方之后不要权限
+/// 就跑了的，供应商侧工具块上写明「未经确认已执行」（`turn/hosted.rs`）。核心取消了、agent 退了的照开会话没成。
+fn ask_every_time(
+    agent: &Agent,
+    session: &str,
+    result: &Value,
+    step: &Step<'_>,
+) -> Result<(), Value> {
+    let Some(found) = modes::read(result) else {
+        return Ok(());
+    };
+    let Some(target) = modes::asking(&found) else {
+        eprintln!(
+            "{} offers no mode that always asks ({}); keeping {}",
+            agent.name,
+            found.available.join(", "),
+            found.current.as_deref().unwrap_or("its default")
+        );
+        return Ok(());
+    };
+    let Some((method, params)) = modes::switch(session, &found, target) else {
+        return Ok(());
+    };
+    match step(method, &params) {
+        Ok(_) => Ok(()),
+        Err(failure @ (Failure::Cancelled | Failure::Closed)) => {
+            Err(setup_failed(agent, method, failure))
+        }
+        Err(failure) => {
+            eprintln!(
+                "{} did not switch to the mode {target:?} ({failure:?}); keeping {}",
+                agent.name,
+                found.current.as_deref().unwrap_or("its default")
+            );
+            Ok(())
+        }
+    }
+}
+
 /// 记下 agent 报的模型、收不收图。
 fn learn(job: &Job<'_>, caps: &Caps, models: &[String]) {
     if let Ok(state) = workspace::state_dir() {
@@ -276,7 +318,7 @@ fn learn(job: &Job<'_>, caps: &Caps, models: &[String]) {
             &Learned {
                 models: (!models.is_empty()).then(|| models.to_vec()),
                 vision: Some(caps.prompt.image),
-                window: None,
+                ..Learned::default()
             },
         );
     }

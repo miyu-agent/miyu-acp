@@ -4,7 +4,9 @@
 //! - `tool_call`：Miyu 的工具（[`Names`] 认得出）记「流这边到了」；MCP 服务转来的那一件调用（[`Turn::tool_call`]）记「MCP
 //!   那边到了」。两边都到了才交一块工具调用并结束这一次（先后以流为准，内容以 MCP 那边为准）；只到了一边的由调用的人掐表
 //!   （[`Turn::waiting`]、[`Turn::timeout`]），照 `miyu-antigravity` 的做法。别的工具调用照实交成供应商侧工具块（`turn/hosted.rs`）。
-//! - `usage_update`：记下最后一次的 `used`（回答的 `usage.context`）、`size`（模型窗口）。`plan` 等别的不交。
+//! - `usage_update`：记下最后一次的 `used`（回答的 `usage.context`）、`size`（模型窗口）和它说的是哪个模型（ACP 的
+//!   `usage_update` 没有这一格，Claude 适配器写在 `_meta["_claude/model"]`：选的是简称 `haiku` 时这里是它真用的
+//!   `claude-haiku-5-5`）。`plan` 等别的不交。
 //! - `session/prompt` 的回应（[`Turn::finish`]）：`end_turn` 正常结束；`max_tokens`、`max_turn_requests` 交一条 `truncated`；
 //!   `refusal` → `content_policy`；`cancelled` → `retryable`。回应带 `usage`（ACP 草案「End-Turn Token Usage」、Claude 适配器
 //!   0.112.0 照它报）的照它记账；没有的不报用量（核心照「没有报告」记，和 `miyu-antigravity` 一样）。
@@ -20,7 +22,7 @@ use crate::names::Names;
 
 mod hosted;
 
-pub use hosted::{OUTCOME_LIMIT, cut};
+pub use hosted::{OUTCOME_LIMIT, cut, unasked_note};
 
 /// 一段字至多多少字节：交给核心的一行不能超过 1 MiB，字里的控制字符转义后至多六倍长。
 pub const TEXT_PIECE: usize = 128 * 1024;
@@ -91,6 +93,7 @@ pub struct Turn {
     handed: bool,
     context: Option<u64>,
     window: Option<u64>,
+    model: Option<String>,
     /// 要过权限的工具调用：自己跑了却没要权限的记一条警告。
     pub(crate) asked: HashSet<String>,
     hosting: hosted::Hosting,
@@ -120,12 +123,20 @@ impl Turn {
             handed: false,
             context: None,
             window: None,
+            model: None,
             asked,
             hosting: hosted::Hosting::default(),
             login: login.to_string(),
         };
         turn.hosting.seen = seen;
         turn
+    }
+
+    /// 给人看的字照界面语言 `language`（握手回应的 `language`）：`zh` 写中文，别的写英文。
+    #[must_use]
+    pub fn speaking(mut self, language: &str) -> Turn {
+        self.hosting.zh = language == "zh";
+        self
     }
 
     /// 这一次说完，要留给同一个 `session/prompt` 下一次的。
@@ -148,6 +159,12 @@ impl Turn {
     #[must_use]
     pub fn window(&self) -> Option<u64> {
         self.window
+    }
+
+    /// 最后一次 `usage_update` 报的模型（agent 写了的话）。
+    #[must_use]
+    pub fn model(&self) -> Option<&str> {
+        self.model.as_deref()
     }
 
     /// 读一条 `session/update` 的 `update`。
@@ -188,6 +205,13 @@ impl Turn {
             Some("usage_update") => {
                 self.context = update.get("used").and_then(Value::as_u64).or(self.context);
                 self.window = update.get("size").and_then(Value::as_u64).or(self.window);
+                if let Some(model) = update
+                    .pointer("/_meta/_claude~1model")
+                    .and_then(Value::as_str)
+                    .filter(|model| !model.is_empty())
+                {
+                    self.model = Some(model.to_string());
+                }
             }
             _ => {}
         }

@@ -215,7 +215,9 @@ pub fn session_params(
 ///   的工具表，不要它先查）、只用 Miyu 的工具时 `enabledTools: ["search_web"]`（自带的只留搜索；它的 `read_url_content` 只交回
 ///   一个本机文件路径，`miyu-antigravity` 照主人定的不开）。
 /// - Claude 适配器（0.112.0 的源码）：只用 Miyu 的工具时 `claudeCode.options.tools: ["WebSearch", "WebFetch"]`（自带的只留
-///   搜索、抓网页）。
+///   搜索、抓网页）；两档都写 `allowDangerouslySkipPermissions: false`：主人本机给 Claude Code 设了「不问」
+///   （`permissions.defaultMode: bypassPermissions`）的，适配器照它起会话；写了这一格它退回 `default`，模式表里也不列
+///   `bypassPermissions`（施工 ACP-10，再由 [`super::modes`] 切到 `default`）。
 #[must_use]
 pub fn session_meta(
     caps: &Caps,
@@ -237,11 +239,12 @@ pub fn session_meta(
             }
             meta.insert("antigravity".into(), Value::Object(antigravity));
         }
-        Family::Claude if only => {
-            meta.insert(
-                "claudeCode".into(),
-                json!({"options": {"tools": ["WebSearch", "WebFetch"]}}),
-            );
+        Family::Claude => {
+            let mut options = json!({"allowDangerouslySkipPermissions": false});
+            if only {
+                options["tools"] = json!(["WebSearch", "WebFetch"]);
+            }
+            meta.insert("claudeCode".into(), json!({"options": options}));
         }
         _ => {}
     }

@@ -253,3 +253,68 @@ fn the_live_turn_starts_after_the_last_message_that_is_not_the_user_s() {
         2
     );
 }
+
+/// 内核 `resources/core/turn-ended/error.txt` 的原文。
+const ERROR_ENDED: &str =
+    "<turn-ended reason=\"error\">This turn stopped on an error.</turn-ended>";
+
+/// 施工 ACP-10（真人实测）：登录失败的那一轮没有回答，核心把「这一轮出错了」那一句和下一句人话攒在同一条 user 消息里交来。
+/// 那一句和它前面的话归进历史，这一轮只交后面那一句；不分的话两句连成一段当这一轮，agent 两句都答、还当自己在重试。
+#[test]
+fn a_turn_that_ended_without_an_answer_goes_into_the_history() {
+    let first = "你好，你是谁？一句话。";
+    let again = "再试一次：你好，你是谁？一句话。";
+    let message = json!({"role": "user", "blocks": [
+        {"type": "text", "text": "<env time=\"x\"/>"},
+        {"type": "text", "text": first},
+        {"type": "text", "text": ERROR_ENDED},
+        {"type": "text", "text": "<env time=\"y\"/>"},
+        {"type": "text", "text": again}
+    ]});
+    let got = transcribe(&request(std::slice::from_ref(&message)), BUDGET).unwrap();
+    assert_eq!(
+        got,
+        format!(
+            "{}User:\n<env time=\"x\"/>\n{first}\n{ERROR_ENDED}\n\n</conversation-history>\n\n<env time=\"y\"/>\n{again}",
+            words::HISTORY_HEAD
+        )
+    );
+    assert_eq!(got.matches(first).count(), 2, "两句各出现在自己的位置");
+
+    // 前面有历史、失败的那一轮是一条单独的 user 消息，下一句另起一条：一样分开，字一个不加。
+    let got = transcribe(
+        &request(&[
+            user("q1"),
+            assistant("a1"),
+            json!({"role": "user", "blocks": [
+                {"type": "text", "text": "q2"}, {"type": "text", "text": ERROR_ENDED}
+            ]}),
+            user("q3"),
+        ]),
+        BUDGET,
+    )
+    .unwrap();
+    assert_eq!(
+        got,
+        format!(
+            "{}User:\nq1\n\nAssistant:\na1\n\nUser:\nq2\n{ERROR_ENDED}\n\n</conversation-history>\n\nq3",
+            words::HISTORY_HEAD
+        )
+    );
+    assert_eq!(live_from(&request(&[message])).unwrap(), 0);
+}
+
+#[test]
+fn the_turn_ended_marker_only_counts_on_the_person_s_side() {
+    let got = transcribe(&request(&[assistant(ERROR_ENDED), user("q")]), BUDGET).unwrap();
+    assert!(got.ends_with("</conversation-history>\n\nq"), "{got}");
+    let quoted = transcribe(
+        &request(&[user("what does <turn-ended reason=\"x\"> mean")]),
+        BUDGET,
+    )
+    .unwrap();
+    assert_eq!(
+        quoted, "what does <turn-ended reason=\"x\"> mean",
+        "人话里提到这几个字不算"
+    );
+}
