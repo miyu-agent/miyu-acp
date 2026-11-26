@@ -6,6 +6,7 @@
 //! 2. 认不上的**新开**（`call/open.rs`）：找到、装好 agent，起进程，`initialize`，开会话（系统提示词照能力交，Miyu 的工具经
 //!    `mcpServers` 交），整份历史转写成第一次提问。
 //! 3. 出了任何错（含 `driver.cancel`）：这段会话作废——收进程组（丢掉 [`Live`] 就是收掉）。
+//! 4. 一次性的辅助请求（`one_off`：起标题、回顾这类）不认也不登记：新开、说完就收进程（施工 ACP-12）。
 //!
 //! `driver.cancel` 经 [`Signal::Cancel`] 送进同一个通道。
 
@@ -104,10 +105,16 @@ pub fn run(
         Err(message) => return Answer::BadParams(message),
     };
     let names = Names::new(declared.iter().map(|tool| tool.name.clone()));
-    let incoming = incoming(params, model, request);
-    if incoming.is_none() {
-        eprintln!("call {call}: no usable fingerprint; this agent session will not be kept");
-    }
+    let incoming = if one_off(request) {
+        eprintln!("call {call}: a one-off request; its agent session ends with it");
+        None
+    } else {
+        let incoming = incoming(params, model, request);
+        if incoming.is_none() {
+            eprintln!("call {call}: no usable fingerprint; this agent session will not be kept");
+        }
+        incoming
+    };
     let job = Job {
         out,
         config,
@@ -138,6 +145,26 @@ pub fn run(
         }
     }
     Answer::Result(open::fresh(&job, incoming))
+}
+
+/// 一次性的辅助请求：没有 system、没有工具、只有一条消息（核心起标题、回顾的请求就是这样写的：不接主对话的前缀）。主对话
+/// 总带着 system，不带工具的人格也一样。它没有下一轮，登记了只会占着表里的位置、让进程闲着等到 `acp.keep_seconds`。
+fn one_off(request: &Value) -> bool {
+    let empty = |key: &str| {
+        request
+            .get(key)
+            .and_then(Value::as_array)
+            .is_none_or(Vec::is_empty)
+    };
+    let system = request
+        .get("system")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    let messages = request
+        .get("messages")
+        .and_then(Value::as_array)
+        .map_or(0, Vec::len);
+    system.trim().is_empty() && empty("tools") && messages == 1
 }
 
 /// 认对话要的：模型、`fingerprint` 的三样、每条消息的 `role`。缺了、写法不对、消息指纹和消息数对不上的是 `None`。
